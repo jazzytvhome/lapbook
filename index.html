@@ -52,7 +52,11 @@
 
   #wrap{flex:1;position:relative;overflow:auto;}
   .view{position:absolute;inset:0;display:none;}
-  .view.on{display:block;}
+  .view.on{display:block;animation:viewfade .2s ease;}
+  @keyframes viewfade{from{opacity:0;} to{opacity:1;}}
+  .btn{transition:background .12s ease, transform .08s ease;}
+  .btn:active{transform:scale(.95);}
+  .views .btn{transition:background .15s ease, color .15s ease;}
   #editView{overflow:auto;}
 
   #board{position:relative;width:1200px;height:800px;margin:24px auto;
@@ -60,13 +64,20 @@
   #board::before,#board::after{content:"";position:absolute;top:0;bottom:0;width:0;border-left:2px dashed #00000022;}
   #board::before{left:var(--sL);} #board::after{left:var(--sR);}
 
-  .el{position:absolute;border-radius:9px;background:#fff;box-shadow:0 4px 14px #0003;
-    overflow:hidden;display:flex;flex-direction:column;min-width:90px;min-height:60px;}
+  .el{position:absolute;top:0;left:0;border-radius:10px;background:#fff;box-shadow:0 4px 14px #0003;
+    overflow:hidden;display:flex;flex-direction:column;min-width:90px;min-height:60px;
+    will-change:transform;
+    transition:transform .14s cubic-bezier(.2,.8,.2,1), box-shadow .18s ease, width .12s ease, height .12s ease;}
+  .el:hover{box-shadow:0 9px 26px #0005;}
+  .el.grab{transition:box-shadow .15s ease; box-shadow:0 16px 40px #0006; scale:1.03; user-select:none; cursor:grabbing; z-index:9999;}
+  .el.pop{animation:pop .22s cubic-bezier(.2,.9,.3,1.2);}
+  @keyframes pop{from{opacity:0; scale:.85;} to{opacity:1; scale:1;}}
   .el .bar{height:22px;display:flex;align-items:center;gap:3px;padding:0 5px;cursor:grab;font-size:11px;color:#fff;user-select:none;}
   .el .bar .ttl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .el .bar button{background:#0003;border:0;color:#fff;border-radius:4px;cursor:pointer;font-size:11px;line-height:1;padding:2px 5px;}
   .el .bar button:hover{background:#0006;}
-  .el .body{flex:1;padding:8px 10px;font-size:13px;color:#222;outline:none;overflow:auto;line-height:1.35;}
+  .el .body{flex:1;padding:8px 10px;font-size:13px;color:#222;outline:none;overflow:auto;line-height:1.35;cursor:text;}
+  .el .body:focus,.el .title:focus{background:#fffbe6;box-shadow:inset 0 0 0 2px #ffd27a;border-radius:6px;}
   .el .title{font-weight:700;font-size:14px;padding:8px 10px 2px;color:#222;outline:none;}
   .el.flap .body{border-top:1px solid #0001;}
   .el.note{background:#fff7a8;} .el.note .bar{background:#caa400;}
@@ -366,6 +377,8 @@ function changeFs(el,d){ store.update(el.id,{fs:clamp(bodyFs(el)+d,9,72)}); }
 /* =====================  RENDER  ================================== */
 const board=$("#board");
 let cutMode=false, pending=null, dragging=false;
+const nodes=new Map();          // id -> {node, refs} (persistent, so editing/animation survive)
+let cutSvgEl=null, capEl=null;
 
 function applyLayout(){
   BW=layout.bw;
@@ -377,47 +390,72 @@ function applyLayout(){
 }
 onLayout=()=>{ applyLayout(); drawPreviewIfVisible(); draw3DIfVisible(); };
 function renderAll(){
-  if(dragging) return;        // don't rebuild the board mid-drag/resize
-  applyLayout(); board.innerHTML="";
-  Object.values(state).filter(e=>e.type!=="cut").sort((a,b)=>(a.z||0)-(b.z||0)).forEach(el=>board.appendChild(makeNode(el)));
+  if(dragging) return;        // dragged/resized node is updated directly, skip full pass
+  applyLayout();
+  const seen=new Set();
+  Object.values(state).filter(e=>e.type!=="cut").forEach(el=>{ seen.add(el.id);
+    let rec=nodes.get(el.id), fresh=false;
+    if(!rec){ rec=createNode(el); nodes.set(el.id,rec); board.appendChild(rec.node); fresh=true; }
+    updateNode(rec,el);
+    if(fresh){ rec.node.classList.add("pop");
+      rec.node.addEventListener("animationend",()=>rec.node.classList.remove("pop"),{once:true});
+      requestAnimationFrame(()=>{ rec.node.style.transition=""; }); }   // enable glide only after placed
+  });
+  for(const [id,rec] of nodes){ if(!seen.has(id)){ rec.node.remove(); nodes.delete(id); } }
   buildCutLayer();
   drawPreviewIfVisible(); draw3DIfVisible();
 }
 onState=renderAll;
 
-function makeNode(el){
-  const n=document.createElement("div"); n.className="el "+el.type;
-  n.style.left=el.x+"px"; n.style.top=el.y+"px"; n.style.width=(el.w||200)+"px"; n.style.height=(el.h||120)+"px"; n.dataset.id=el.id;
-  const bar=document.createElement("div"); bar.className="bar"; bar.style.background=el.byColor||"#555";
-  const ttl=document.createElement("span"); ttl.className="ttl"; ttl.textContent=el.type==="photo"?"📷 "+(el.by||""):(el.by||"");
-  bar.appendChild(ttl);
-  if(el.type!=="photo"){
-    bar.appendChild(barBtn("A−","smaller",()=>changeFs(el,-2)));
-    bar.appendChild(barBtn("A+","bigger",()=>changeFs(el,2)));
-    const bb=barBtn("B","bold",()=>store.update(el.id,{b:!el.b})); bb.style.fontWeight="700"; if(el.b) bb.style.background="#0007"; bar.appendChild(bb);
+/* Build a card's DOM once; updateNode() mutates it in place afterwards so the
+   caret survives typing and remote changes animate instead of teleporting. */
+function createNode(el){
+  const id=el.id, type=el.type;
+  const n=document.createElement("div"); n.className="el "+type; n.dataset.id=id; n.style.transition="none";
+  const bar=document.createElement("div"); bar.className="bar";
+  const ttl=document.createElement("span"); ttl.className="ttl"; bar.appendChild(ttl);
+  let boldBtn=null;
+  if(type!=="photo"){
+    bar.appendChild(barBtn("A−","smaller",()=>changeFs(state[id],-2)));
+    bar.appendChild(barBtn("A+","bigger",()=>changeFs(state[id],2)));
+    boldBtn=barBtn("B","bold",()=>store.update(id,{b:!state[id].b})); boldBtn.style.fontWeight="700"; bar.appendChild(boldBtn);
   }
-  const del=barBtn("✕","delete",()=>store.remove(el.id)); bar.appendChild(del);
+  bar.appendChild(barBtn("✕","delete",()=>store.remove(id)));
   n.appendChild(bar);
-
-  if(el.type==="flap"){ n.appendChild(editable("title",el.title,v=>store.update(el.id,{title:v}),el)); n.appendChild(editable("body",el.body,v=>store.update(el.id,{body:v}),el)); }
-  else if(el.type==="photo"){ const img=document.createElement("img"); img.src=el.img; img.draggable=false; n.appendChild(img); }
-  else { n.appendChild(editable("body",el.body,v=>store.update(el.id,{body:v}),el)); }
-
+  let title=null, body=null, img=null;
+  if(type==="flap"){ title=editable("title",v=>store.update(id,{title:v})); body=editable("body",v=>store.update(id,{body:v})); n.appendChild(title); n.appendChild(body); }
+  else if(type==="photo"){ img=document.createElement("img"); img.draggable=false; n.appendChild(img); }
+  else { body=editable("body",v=>store.update(id,{body:v})); n.appendChild(body); }
   const rz=document.createElement("div"); rz.className="resize"; n.appendChild(rz);
-  enableResize(rz,n,el); enableDrag(bar,n,el); return n;
+  const rec={node:n,bar,ttl,title,body,img,boldBtn,type,id};
+  enableDrag(rec); enableResize(rec,rz);
+  return rec;
+}
+function updateNode(rec,el){
+  const n=rec.node;
+  n.style.transform=`translate(${el.x||0}px,${el.y||0}px)`;
+  n.style.width=(el.w||200)+"px"; n.style.height=(el.h||120)+"px"; n.style.zIndex=el.z||0;
+  rec.bar.style.background=el.byColor||"#555";
+  rec.ttl.textContent = rec.type==="photo" ? "📷 "+(el.by||"") : (el.by||"");
+  if(rec.boldBtn) rec.boldBtn.style.background = el.b ? "#0007" : "";
+  const fs=bodyFs(el), wt=el.b?"700":"";
+  if(rec.body){ rec.body.style.fontSize=fs+"px"; rec.body.style.fontWeight=wt;
+    if(document.activeElement!==rec.body && rec.body.textContent!==(el.body||"")) rec.body.textContent=el.body||""; }
+  if(rec.title && document.activeElement!==rec.title && rec.title.textContent!==(el.title||"")) rec.title.textContent=el.title||"";
+  if(rec.img && el.img && rec.img.getAttribute("src")!==el.img) rec.img.src=el.img;
 }
 function barBtn(label,title,fn){ const b=document.createElement("button"); b.textContent=label; b.title=title;
+  b.addEventListener("pointerdown",e=>e.stopPropagation());
   b.onclick=e=>{ e.stopPropagation(); fn(); }; return b; }
-function editable(cls,val,onSave,el){
-  const d=document.createElement("div"); d.className=cls; d.contentEditable="true"; d.spellcheck=false; d.textContent=val||"";
-  if(cls==="body"){ d.style.fontSize=bodyFs(el)+"px"; d.style.fontWeight=el.b?"700":""; }
-  let t;
-  d.addEventListener("input",()=>{clearTimeout(t);t=setTimeout(()=>onSave(d.textContent),350);});
+function editable(cls,onSave){
+  const d=document.createElement("div"); d.className=cls; d.contentEditable="true"; d.spellcheck=false;
+  let t; d.addEventListener("input",()=>{ clearTimeout(t); t=setTimeout(()=>onSave(d.textContent),400); });
   d.addEventListener("blur",()=>onSave(d.textContent)); return d;
 }
 
 /* ---- manual cut lines: click two points → white line everyone sees ---- */
 function buildCutLayer(){
+  if(cutSvgEl){ cutSvgEl.remove(); cutSvgEl=null; } if(capEl){ capEl.remove(); capEl=null; }
   const svg=document.createElementNS(SVGNS,"svg");
   svg.setAttribute("width",BW); svg.setAttribute("height",layout.h);
   svg.style.position="absolute"; svg.style.left="0"; svg.style.top="0"; svg.style.zIndex="50";
@@ -431,7 +469,7 @@ function buildCutLayer(){
     svg.appendChild(ln);
   });
   if(pending){ const dot=document.createElementNS(SVGNS,"circle"); dot.setAttribute("cx",pending.x); dot.setAttribute("cy",pending.y); dot.setAttribute("r","8"); dot.setAttribute("fill","#e23"); svg.appendChild(dot); }
-  board.appendChild(svg);
+  board.appendChild(svg); cutSvgEl=svg;
 
   const cap=document.createElement("div"); cap.style.position="absolute"; cap.style.inset="0"; cap.style.zIndex="60";
   cap.style.cursor="crosshair"; cap.style.display=cutMode?"block":"none";
@@ -440,30 +478,59 @@ function buildCutLayer(){
     if(!pending){ pending=pt; renderAll(); }
     else { const a=pending; pending=null; const id=newId(); store.set(id,{id,type:"cut",x1:a.x,y1:a.y,x2:pt.x,y2:pt.y,z:maxZ()+1,w:18}); }
   });
-  board.appendChild(cap);
+  board.appendChild(cap); capEl=cap;
 }
 
 /* =====================  DRAG & RESIZE  =========================== */
 function boardPoint(e){ const r=board.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; }
-function enableDrag(handle,node,el){
-  handle.addEventListener("pointerdown",e=>{
-    if(e.target.tagName==="BUTTON") return; e.preventDefault(); handle.setPointerCapture(e.pointerId); dragging=true;
-    const p=boardPoint(e); const offx=p.x-el.x,offy=p.y-el.y; const z=maxZ()+1; node.style.zIndex=z; let last=0;
-    const move=ev=>{ const q=boardPoint(ev);
-      const nx=clamp(q.x-offx,0,BW-(el.w||120)), ny=clamp(q.y-offy,0,layout.h-(el.h||60));
-      el.x=nx;el.y=ny;node.style.left=nx+"px";node.style.top=ny+"px";
-      const now=Date.now(); if(now-last>60){last=now;store.update(el.id,{x:nx,y:ny,z});} };
-    const up=()=>{ handle.releasePointerCapture(e.pointerId); handle.removeEventListener("pointermove",move); handle.removeEventListener("pointerup",up); dragging=false; store.update(el.id,{x:el.x,y:el.y,z}); renderAll(); };
-    handle.addEventListener("pointermove",move); handle.addEventListener("pointerup",up);
+
+/* Drag from anywhere on a card; a click (no movement) on a text card focuses it
+   for typing. Active text editing disables drag so you can select/place caret. */
+function enableDrag(rec){
+  const node=rec.node, id=rec.id;
+  node.addEventListener("pointerdown",e=>{
+    if(e.button!==0 || cutMode) return;
+    if(e.target.closest("button") || e.target.classList.contains("resize")) return;
+    const el=state[id]; if(!el) return;
+    const tgtEditable=e.target.isContentEditable;
+    if(tgtEditable && document.activeElement===e.target) return;  // already typing → leave it alone
+    const start=boardPoint(e); const ox=start.x-(el.x||0), oy=start.y-(el.y||0); const z=maxZ()+1;
+    let started=false, lx=el.x||0, ly=el.y||0, last=0;
+    const move=ev=>{
+      const q=boardPoint(ev);
+      if(!started){ if(Math.abs(q.x-start.x)<4 && Math.abs(q.y-start.y)<4) return;
+        started=true; dragging=true; node.classList.add("grab"); node.style.transition="none"; node.style.zIndex=z;
+        try{ node.setPointerCapture(e.pointerId); }catch(_){}
+        if(document.activeElement && node.contains(document.activeElement)) document.activeElement.blur();
+        const sel=window.getSelection&&window.getSelection(); if(sel) sel.removeAllRanges();
+      }
+      ev.preventDefault();
+      const cur=state[id]||el;
+      lx=clamp(q.x-ox,0,BW-(cur.w||120)); ly=clamp(q.y-oy,0,layout.h-(cur.h||60));
+      node.style.transform=`translate(${lx}px,${ly}px)`;
+      const now=Date.now(); if(now-last>50){ last=now; store.update(id,{x:lx,y:ly,z}); }
+    };
+    const up=()=>{
+      node.removeEventListener("pointermove",move); node.removeEventListener("pointerup",up);
+      if(started){ try{node.releasePointerCapture(e.pointerId);}catch(_){}
+        dragging=false; node.classList.remove("grab"); node.style.transition="";
+        store.update(id,{x:lx,y:ly,z}); renderAll();
+      } else if(!tgtEditable){ const ed=rec.body||rec.title; if(ed) ed.focus(); }
+    };
+    node.addEventListener("pointermove",move); node.addEventListener("pointerup",up);
   });
 }
-function enableResize(grip,node,el){
+function enableResize(rec,grip){
+  const node=rec.node, id=rec.id;
   grip.addEventListener("pointerdown",e=>{
-    e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId); dragging=true;
-    const s=boardPoint(e); const w0=el.w||200,h0=el.h||120;
-    const move=ev=>{ const q=boardPoint(ev); el.w=clamp(w0+(q.x-s.x),90,BW); el.h=clamp(h0+(q.y-s.y),60,layout.h);
-      node.style.width=el.w+"px";node.style.height=el.h+"px"; };
-    const up=()=>{ grip.releasePointerCapture(e.pointerId); grip.removeEventListener("pointermove",move); grip.removeEventListener("pointerup",up); dragging=false; store.update(el.id,{w:el.w,h:el.h}); renderAll(); };
+    e.preventDefault(); e.stopPropagation(); try{grip.setPointerCapture(e.pointerId);}catch(_){}
+    dragging=true; node.style.transition="none";
+    const s=boardPoint(e); const el=state[id]||{}; const w0=el.w||200,h0=el.h||120; let nw=w0,nh=h0;
+    const move=ev=>{ const q=boardPoint(ev); nw=clamp(w0+(q.x-s.x),90,BW); nh=clamp(h0+(q.y-s.y),60,layout.h);
+      node.style.width=nw+"px"; node.style.height=nh+"px"; };
+    const up=()=>{ try{grip.releasePointerCapture(e.pointerId);}catch(_){}
+      grip.removeEventListener("pointermove",move); grip.removeEventListener("pointerup",up);
+      dragging=false; node.style.transition=""; store.update(id,{w:nw,h:nh}); renderAll(); };
     grip.addEventListener("pointermove",move); grip.addEventListener("pointerup",up);
   });
 }
