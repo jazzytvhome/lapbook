@@ -168,11 +168,15 @@
 
   <div id="liveView" class="view">
     <div class="tut">
-      <h2>🚀 Make it live (real-time updates)</h2>
+      <h2>🚀 Live multiplayer</h2>
       <p>Status right now: <span id="liveBadge" class="livebadge off">checking…</span></p>
-      <div class="card"><b>What "live" means:</b> once set up, you and your friend can edit the
-        <i>same</i> lapbook from <i>different computers</i> and see each other's changes instantly.
-        Powered by Google Firebase (free, no card).</div>
+      <div class="card"><b>✅ You're already live — no setup needed!</b> This app syncs over a free public
+        relay. You and your friend just need the <b>same room code</b> (use 🎲 New code → 🔗 Copy invite link).
+        Edit from different computers and you'll see each other's changes in real time.</div>
+      <div class="card" style="border-color:#5b4a1d"><b>Heads up:</b> the free relay is best-effort and
+        <i>not private</i> — anyone who guesses your room code could view it. For a private, rock-solid
+        setup, do the optional Google Firebase steps below (free, no card). Once you add a Firebase config,
+        the app automatically uses it instead of the public relay.</div>
       <h3>Step 1 — Create a free Firebase project (~2 min)</h3>
       <ol>
         <li>Open <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a>, sign in with Google.</li>
@@ -215,6 +219,8 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<!-- Free public real-time relay (no account needed) -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 
 <script type="importmap">
 { "imports": {
@@ -292,16 +298,55 @@ function makeCloudStore(room){
     presence:ping
   };
 }
+/* Public real-time relay over MQTT/WebSocket — zero setup, no account.
+   Uses "retained" messages so a joiner instantly gets the current board. */
+function makeMqttStore(room){
+  const base="lbk1/"+room;
+  state=JSON.parse(localStorage.getItem("lb_room_"+room)||"{}");
+  layout=fixLayout(JSON.parse(localStorage.getItem("lb_layout_"+room)||"null"));
+  const saveLocal=()=>{ localStorage.setItem("lb_room_"+room,JSON.stringify(state)); localStorage.setItem("lb_layout_"+room,JSON.stringify(layout)); };
+  const presTopic=base+"/p/"+myId;
+  const client=mqtt.connect("wss://broker.emqx.io:8084/mqtt",{
+    clientId:"lb_"+myId+"_"+Math.floor(Math.random()*1e5).toString(36),
+    keepalive:30, reconnectPeriod:3000, connectTimeout:8000,
+    will:{topic:presTopic,payload:"",retain:true,qos:0}
+  });
+  const pub=(t,p)=>{ try{ client.publish(t,p,{retain:true,qos:0}); }catch(_){} };
+  const ping=()=>pub(presTopic,JSON.stringify({name:myName||"anon",color:myColor,t:Date.now()}));
+  client.on("connect",()=>{ setStatus(true,"relay"); updateLiveBadge(); client.subscribe(base+"/#",{qos:0}); ping(); });
+  client.on("reconnect",()=>setStatus(true,"connecting"));
+  client.on("error",e=>console.error("relay",e));
+  client.on("message",(topic,buf)=>{
+    const rest=topic.slice(base.length+1); const p=buf.toString();
+    if(rest.startsWith("el/")){ const id=rest.slice(3); if(p==="") delete state[id]; else { try{state[id]=JSON.parse(p);}catch(_){ } } onState(); saveLocal(); }
+    else if(rest==="layout"){ if(p){ try{ layout=fixLayout(JSON.parse(p)); onLayout(); saveLocal(); }catch(_){ } } }
+    else if(rest.startsWith("p/")){ const uid=rest.slice(2); if(p==="") delete presence[uid]; else { try{presence[uid]=JSON.parse(p);}catch(_){ } } renderPresence(); }
+  });
+  setInterval(()=>{ if(client.connected) ping(); },20000);
+  return {
+    live:true, relay:true,
+    set:(id,o)=>{ state[id]=o; onState(); saveLocal(); pub(base+"/el/"+id,JSON.stringify(o)); },
+    update:(id,pp)=>{ state[id]={...(state[id]||{}),...pp}; onState(); saveLocal(); pub(base+"/el/"+id,JSON.stringify(state[id])); },
+    remove:id=>{ delete state[id]; onState(); saveLocal(); pub(base+"/el/"+id,""); },
+    setLayout:pp=>{ layout={...layout,...pp}; onLayout(); saveLocal(); pub(base+"/layout",JSON.stringify(layout)); },
+    replaceAll:(els,lay)=>{ const old=Object.keys(state); state=els||{}; layout=fixLayout(lay); onState(); onLayout(); saveLocal();
+      old.forEach(id=>{ if(!state[id]) pub(base+"/el/"+id,""); });
+      Object.values(state).forEach(o=>pub(base+"/el/"+o.id,JSON.stringify(o))); pub(base+"/layout",JSON.stringify(layout)); },
+    presence:ping
+  };
+}
 function initStore(){
   const room=currentRoom(); $("#room").value=room;
   const cfg=window.FIREBASE_CONFIG||{}; cloudOK=!!(cfg.apiKey&&cfg.databaseURL);
-  if(cloudOK){ try{ if(!firebase.apps.length) firebase.initializeApp(cfg); store=makeCloudStore(room); setStatus(true);}catch(e){console.error(e);cloudOK=false;} }
-  if(!cloudOK){ store=makeLocalStore(room); setStatus(false); }
-  updateLiveBadge();
+  if(cloudOK){ try{ if(!firebase.apps.length) firebase.initializeApp(cfg); store=makeCloudStore(room); setStatus(true,"firebase"); updateLiveBadge(); return; }catch(e){console.error(e);cloudOK=false;} }
+  if(window.mqtt){ try{ store=makeMqttStore(room); setStatus(true,"connecting"); updateLiveBadge(); return; }catch(e){console.error(e);} }
+  store=makeLocalStore(room); setStatus(false); updateLiveBadge();
 }
-function setStatus(live){ const s=$("#status");
-  if(live){s.textContent="🟢 LIVE — share the link";s.className="";}
-  else{s.textContent="💾 local only — see 🚀 Go Live";s.className="local";} }
+function setStatus(live,mode){ const s=$("#status");
+  if(mode==="firebase"){ s.textContent="🟢 LIVE — share the link"; s.className=""; }
+  else if(mode==="relay"){ s.textContent="🟢 LIVE (public) — share the link"; s.className=""; }
+  else if(mode==="connecting"){ s.textContent="🟡 connecting live…"; s.className=""; }
+  else { s.textContent="💾 local only"; s.className="local"; } }
 function switchRoom(room){ location.hash=room; location.reload(); }
 
 /* =====================  ELEMENTS  ================================= */
@@ -320,7 +365,7 @@ function changeFs(el,d){ store.update(el.id,{fs:clamp(bodyFs(el)+d,9,72)}); }
 
 /* =====================  RENDER  ================================== */
 const board=$("#board");
-let cutMode=false, pending=null;
+let cutMode=false, pending=null, dragging=false;
 
 function applyLayout(){
   BW=layout.bw;
@@ -332,6 +377,7 @@ function applyLayout(){
 }
 onLayout=()=>{ applyLayout(); drawPreviewIfVisible(); draw3DIfVisible(); };
 function renderAll(){
+  if(dragging) return;        // don't rebuild the board mid-drag/resize
   applyLayout(); board.innerHTML="";
   Object.values(state).filter(e=>e.type!=="cut").sort((a,b)=>(a.z||0)-(b.z||0)).forEach(el=>board.appendChild(makeNode(el)));
   buildCutLayer();
@@ -401,23 +447,23 @@ function buildCutLayer(){
 function boardPoint(e){ const r=board.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; }
 function enableDrag(handle,node,el){
   handle.addEventListener("pointerdown",e=>{
-    if(e.target.tagName==="BUTTON") return; e.preventDefault(); handle.setPointerCapture(e.pointerId);
+    if(e.target.tagName==="BUTTON") return; e.preventDefault(); handle.setPointerCapture(e.pointerId); dragging=true;
     const p=boardPoint(e); const offx=p.x-el.x,offy=p.y-el.y; const z=maxZ()+1; node.style.zIndex=z; let last=0;
     const move=ev=>{ const q=boardPoint(ev);
       const nx=clamp(q.x-offx,0,BW-(el.w||120)), ny=clamp(q.y-offy,0,layout.h-(el.h||60));
       el.x=nx;el.y=ny;node.style.left=nx+"px";node.style.top=ny+"px";
       const now=Date.now(); if(now-last>60){last=now;store.update(el.id,{x:nx,y:ny,z});} };
-    const up=()=>{ handle.releasePointerCapture(e.pointerId); handle.removeEventListener("pointermove",move); handle.removeEventListener("pointerup",up); store.update(el.id,{x:el.x,y:el.y,z}); };
+    const up=()=>{ handle.releasePointerCapture(e.pointerId); handle.removeEventListener("pointermove",move); handle.removeEventListener("pointerup",up); dragging=false; store.update(el.id,{x:el.x,y:el.y,z}); renderAll(); };
     handle.addEventListener("pointermove",move); handle.addEventListener("pointerup",up);
   });
 }
 function enableResize(grip,node,el){
   grip.addEventListener("pointerdown",e=>{
-    e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
+    e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId); dragging=true;
     const s=boardPoint(e); const w0=el.w||200,h0=el.h||120;
     const move=ev=>{ const q=boardPoint(ev); el.w=clamp(w0+(q.x-s.x),90,BW); el.h=clamp(h0+(q.y-s.y),60,layout.h);
       node.style.width=el.w+"px";node.style.height=el.h+"px"; };
-    const up=()=>{ grip.releasePointerCapture(e.pointerId); grip.removeEventListener("pointermove",move); grip.removeEventListener("pointerup",up); store.update(el.id,{w:el.w,h:el.h}); };
+    const up=()=>{ grip.releasePointerCapture(e.pointerId); grip.removeEventListener("pointermove",move); grip.removeEventListener("pointerup",up); dragging=false; store.update(el.id,{w:el.w,h:el.h}); renderAll(); };
     grip.addEventListener("pointermove",move); grip.addEventListener("pointerup",up);
   });
 }
@@ -601,7 +647,8 @@ function flash(msg){ $("#hint").textContent=msg; }
 
 /* =====================  GO LIVE BADGE  ========================== */
 function updateLiveBadge(){ const b=$("#liveBadge"); if(!b) return;
-  if(store&&store.live){ b.textContent="🟢 LIVE — real-time on"; b.className="livebadge on"; }
+  if(store&&store.relay){ b.textContent="🟢 LIVE on a free public relay"; b.className="livebadge on"; }
+  else if(store&&store.live){ b.textContent="🟢 LIVE — private Firebase on"; b.className="livebadge on"; }
   else{ b.textContent="🟠 Local only — not live yet"; b.className="livebadge off"; } }
 
 /* =====================  VIEW SWITCH  ============================ */
