@@ -245,7 +245,10 @@ let myColor = localStorage.getItem("lb_color");
 if(!myColor){ myColor=COLORS[Math.floor(Math.random()*COLORS.length)]; localStorage.setItem("lb_color",myColor); }
 
 function currentRoom(){ return (location.hash.replace(/^#/,"")||"").trim()||"my-lapbook"; }
-function fixLayout(l){ return {...DEFAULT_LAYOUT, ...(l||{})}; }
+function fixLayout(l){ l={...DEFAULT_LAYOUT, ...(l||{})};
+  // tri-fold is always symmetric: side flaps equal, center centred on the board
+  let cw=Math.max(120,Math.min(l.sR-l.sL, l.bw-80));
+  l.sL=Math.round((l.bw-cw)/2); l.sR=l.bw-l.sL; return l; }
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function bodyFs(el){ return el.fs || (el.type==="text"?18:13); }
 
@@ -624,11 +627,10 @@ $("#cutTool").onclick=()=>{ cutMode=!cutMode; pending=null; $("#cutTool").classL
 $("#clearCuts").onclick=()=>{ Object.values(state).filter(e=>e.type==="cut").forEach(c=>store.remove(c.id)); };
 
 $("#boardW").oninput=e=>{ const bw=clamp(+e.target.value,700,2000);
-  let sL=Math.min(layout.sL,bw-180), sR=Math.min(layout.sR,bw-60); sL=clamp(sL,60,bw-120); sR=clamp(sR,sL+120,bw-40);
-  store.setLayout({bw,sL,sR}); };
-$("#centerW").oninput=e=>{ const cw=+e.target.value; const mid=(layout.sL+layout.sR)/2;
-  let sL=Math.round(mid-cw/2), sR=Math.round(mid+cw/2); sL=clamp(sL,60,layout.bw-120); sR=clamp(sR,sL+120,layout.bw-60);
-  store.setLayout({sL,sR}); };
+  let cw=clamp(layout.sR-layout.sL,120,bw-80); const sL=Math.round((bw-cw)/2);
+  store.setLayout({bw,sL,sR:bw-sL}); };
+$("#centerW").oninput=e=>{ const cw=clamp(+e.target.value,120,layout.bw-80); const sL=Math.round((layout.bw-cw)/2);
+  store.setLayout({sL,sR:layout.bw-sL}); };
 $("#boardH").oninput=e=>store.setLayout({h:clamp(+e.target.value,400,1600)});
 
 $("#optTrim").checked=settings.trim; $("#optCut").checked=settings.cut;
