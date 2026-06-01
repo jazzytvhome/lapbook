@@ -82,6 +82,10 @@
   .el.flap .body{border-top:1px solid #0001;}
   .el.note{background:#fff7a8;} .el.note .bar{background:#caa400;}
   .el.text{background:transparent;box-shadow:none;}
+  .el.text:hover{box-shadow:none;}
+  .el.text .body{font-size:18px;}
+  .el.text .bar{background:rgba(20,24,34,.6);opacity:0;transition:opacity .15s;}
+  .el.text:hover .bar,.el.text:focus-within .bar{opacity:1;}
   .el.photo{padding:0;}
   .el.photo img{width:100%;height:100%;object-fit:cover;display:block;flex:1;}
   .el .resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
@@ -459,7 +463,7 @@ function buildCutLayer(){
   const svg=document.createElementNS(SVGNS,"svg");
   svg.setAttribute("width",BW); svg.setAttribute("height",layout.h);
   svg.style.position="absolute"; svg.style.left="0"; svg.style.top="0"; svg.style.zIndex="50";
-  svg.style.pointerEvents = cutMode ? "none" : "auto";
+  svg.style.pointerEvents = "none";   // never block the cards underneath; only the lines are clickable
   Object.values(state).filter(e=>e.type==="cut").forEach(c=>{
     const ln=document.createElementNS(SVGNS,"line");
     ln.setAttribute("x1",c.x1); ln.setAttribute("y1",c.y1); ln.setAttribute("x2",c.x2); ln.setAttribute("y2",c.y2);
