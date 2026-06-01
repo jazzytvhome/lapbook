@@ -578,7 +578,9 @@ function paintBoard(ctx,W,H,onImgReady,opts={}){
     const wt = el.b?"bold ":"";
     if(el.type==="text"){ ctx.fillStyle="#222"; const fs=bodyFs(el); ctx.font=`${wt}${fs*sy}px system-ui`; wrapText(ctx,el.body||"",x,y+fs*sy,w,(fs+6)*sy); }
     else if(el.type==="photo"){ const im=getImg(el.img,onImgReady);
-      if(im.complete&&im.naturalWidth){ roundRect(ctx,x,y,w,h,8); ctx.clip(); ctx.drawImage(im,x,y,w,h); }
+      if(im.complete&&im.naturalWidth){ roundRect(ctx,x,y,w,h,8); ctx.clip();
+        const iw=im.naturalWidth,ih=im.naturalHeight,s=Math.max(w/iw,h/ih),cw2=w/s,ch2=h/s;
+        ctx.drawImage(im,(iw-cw2)/2,(ih-ch2)/2,cw2,ch2,x,y,w,h); }   // object-fit: cover
       else { ctx.fillStyle="#ddd"; roundRect(ctx,x,y,w,h,8); ctx.fill(); } }
     else { ctx.fillStyle=el.type==="note"?"#fff7a8":"#ffffff"; roundRect(ctx,x,y,w,h,9);
       ctx.shadowColor="rgba(0,0,0,.18)";ctx.shadowBlur=10;ctx.shadowOffsetY=4;ctx.fill();ctx.shadowColor="transparent";
@@ -670,11 +672,14 @@ function rebuild3D(){
   setGeo(three.right,rw*scale,worldH);  three.right.mesh.position.x= rw*scale/2;  three.right.hinge.position.x= cw*scale/2;
   // recenter the whole assembly so unequal side panels stay framed
   three.modelGroup.position.x = -((rw-lw)/2)*scale;
-  const W=1500,H=1000; const full=document.createElement("canvas"); full.width=W; full.height=H;
+  // texture rendered at the board's TRUE proportions (uniform scale = no stretch, stays crisp)
+  const k=1800/Math.max(BW,layout.h);
+  const W=Math.max(2,Math.round(BW*k)), H=Math.max(2,Math.round(layout.h*k));
+  const full=document.createElement("canvas"); full.width=W; full.height=H;
   paintBoard(full.getContext("2d"),W,H,()=>rebuild3D());
-  slice(three.left,full,0,layout.sL/BW*W);
-  slice(three.center,full,layout.sL/BW*W,(layout.sR-layout.sL)/BW*W);
-  slice(three.right,full,layout.sR/BW*W,(BW-layout.sR)/BW*W);
+  slice(three.left,full,0,layout.sL*k);
+  slice(three.center,full,layout.sL*k,(layout.sR-layout.sL)*k);
+  slice(three.right,full,layout.sR*k,(BW-layout.sR)*k);
   function setGeo(p,w,h){ p.mesh.geometry.dispose(); p.mesh.geometry=new THREE.PlaneGeometry(Math.max(0.01,w),h); }
   function slice(p,src,ox,sw){ const c=document.createElement("canvas"); c.width=Math.max(1,Math.round(sw)); c.height=H;
     c.getContext("2d").drawImage(src,ox,0,sw,H,0,0,c.width,H); p.tex.image=c; p.tex.needsUpdate=true; }
