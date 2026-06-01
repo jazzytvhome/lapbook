@@ -265,7 +265,13 @@ if(!myId){ myId="u"+Math.floor(Math.random()*1e9).toString(36); localStorage.set
 let myColor = localStorage.getItem("lb_color");
 if(!myColor){ myColor=COLORS[Math.floor(Math.random()*COLORS.length)]; localStorage.setItem("lb_color",myColor); }
 
-function randomCode(){ return Math.random().toString(36).slice(2,7); }
+/* Room code = the privacy boundary on the public relay, so it must be
+   unguessable: CSPRNG, 128 bits, hex (no modulo bias). */
+function randomCode(){
+  if(window.crypto&&crypto.getRandomValues){ const a=new Uint8Array(16); crypto.getRandomValues(a);
+    return Array.from(a,b=>b.toString(16).padStart(2,"0")).join(""); }
+  return (Date.now().toString(36)+Math.random().toString(36).slice(2)).slice(0,32); // legacy fallback only
+}
 /* No room in the URL = give THIS visitor a fresh private room, so strangers
    don't all land in one shared board. Sharing happens only via the invite link. */
 function ensureRoom(){ const h=location.hash.replace(/^#/,"").trim(); if(!h) history.replaceState(null,"","#"+randomCode()); }
@@ -719,7 +725,7 @@ function printIt(){
 }
 
 /* =====================  ROOM CODE / LINK  ======================= */
-function newCode(){ switchRoom(Math.random().toString(36).slice(2,7)); }
+function newCode(){ switchRoom(randomCode()); }
 function copyLink(){ const url=location.origin+location.pathname+"#"+currentRoom();
   if(navigator.clipboard) navigator.clipboard.writeText(url).then(()=>flash("Invite link copied: "+url),()=>flash("Copy this link: "+url));
   else flash("Copy this link: "+url); }
