@@ -265,6 +265,10 @@ if(!myId){ myId="u"+Math.floor(Math.random()*1e9).toString(36); localStorage.set
 let myColor = localStorage.getItem("lb_color");
 if(!myColor){ myColor=COLORS[Math.floor(Math.random()*COLORS.length)]; localStorage.setItem("lb_color",myColor); }
 
+function randomCode(){ return Math.random().toString(36).slice(2,7); }
+/* No room in the URL = give THIS visitor a fresh private room, so strangers
+   don't all land in one shared board. Sharing happens only via the invite link. */
+function ensureRoom(){ const h=location.hash.replace(/^#/,"").trim(); if(!h) history.replaceState(null,"","#"+randomCode()); }
 function currentRoom(){ return (location.hash.replace(/^#/,"")||"").trim()||"my-lapbook"; }
 function fixLayout(l){ l={...DEFAULT_LAYOUT, ...(l||{})};
   // tri-fold is always symmetric: side flaps equal, center centred on the board
@@ -766,6 +770,7 @@ $("#room").addEventListener("change",e=>{ const r=e.target.value.trim().replace(
 
 $("#hint").textContent="Tip: each card has A− A+ B (size & bold). Use ✂ Cut tool to click two points and white-out a strip.";
 
+ensureRoom();
 initStore();
 renderAll();
 </script>
