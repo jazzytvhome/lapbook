@@ -324,32 +324,70 @@ function makeCloudStore(room){
   };
 }
 /* Public real-time relay over MQTT/WebSocket — zero setup, no account.
-   Uses "retained" messages so a joiner instantly gets the current board. */
+   Uses "retained" messages so a joiner instantly gets the current board.
+
+   We connect to SEVERAL public brokers (on different ports) at once and treat
+   them as one logical relay: publish to all, accept from any. Restrictive
+   networks (school / work / guest WiFi, some mobile carriers) often block one
+   broker's non-standard port but not another's — so fanning out lets a friend
+   go live even when, say, port 8084 is blocked for them. This is safe because
+   updates are keyed by element id and idempotent, and receiving a message never
+   re-publishes, so duplicate deliveries across brokers do no harm. */
+const RELAY_BROKERS=[
+  "wss://broker.emqx.io:8084/mqtt",
+  "wss://test.mosquitto.org:8081/mqtt",
+  "wss://broker.hivemq.com:8884/mqtt"
+];
 function makeMqttStore(room){
   const base="lbk1/"+room;
   state=JSON.parse(localStorage.getItem("lb_room_"+room)||"{}");
   layout=fixLayout(JSON.parse(localStorage.getItem("lb_layout_"+room)||"null"));
   const saveLocal=()=>{ localStorage.setItem("lb_room_"+room,JSON.stringify(state)); localStorage.setItem("lb_layout_"+room,JSON.stringify(layout)); };
   const presTopic=base+"/p/"+myId;
-  const client=mqtt.connect("wss://broker.emqx.io:8084/mqtt",{
-    clientId:"lb_"+myId+"_"+Math.floor(Math.random()*1e5).toString(36),
-    keepalive:30, reconnectPeriod:3000, connectTimeout:8000,
-    will:{topic:presTopic,payload:"",retain:true,qos:0}
-  });
-  const pub=(t,p)=>{ try{ client.publish(t,p,{retain:true,qos:0}); }catch(_){} };
-  const ping=()=>pub(presTopic,JSON.stringify({name:myName||"anon",color:myColor,t:Date.now()}));
-  client.on("connect",()=>{ setStatus(true,"relay"); updateLiveBadge(); client.subscribe(base+"/#",{qos:0}); ping(); });
-  client.on("reconnect",()=>setStatus(true,"connecting"));
-  client.on("error",e=>console.error("relay",e));
-  client.on("message",(topic,buf)=>{
+  const api={ live:true, relay:true, connected:false };
+  let everConnected=false, clients=[];
+  const anyUp=()=>clients.some(c=>c&&c.connected);
+
+  const onMessage=(topic,buf)=>{
+    if(!topic.startsWith(base+"/")) return;
     const rest=topic.slice(base.length+1); const p=buf.toString();
     if(rest.startsWith("el/")){ const id=rest.slice(3); if(p==="") delete state[id]; else { try{state[id]=JSON.parse(p);}catch(_){ } } onState(); saveLocal(); }
     else if(rest==="layout"){ if(p){ try{ layout=fixLayout(JSON.parse(p)); onLayout(); saveLocal(); }catch(_){ } } }
     else if(rest.startsWith("p/")){ const uid=rest.slice(2); if(p==="") delete presence[uid]; else { try{presence[uid]=JSON.parse(p);}catch(_){ } } renderPresence(); }
+  };
+  const presPayload=()=>JSON.stringify({name:myName||"anon",color:myColor,t:Date.now()});
+
+  clients=RELAY_BROKERS.map(url=>{
+    const client=mqtt.connect(url,{
+      clientId:"lb_"+myId+"_"+Math.floor(Math.random()*1e5).toString(36),
+      keepalive:30, reconnectPeriod:5000, connectTimeout:8000,
+      will:{topic:presTopic,payload:"",retain:true,qos:0}
+    });
+    client.on("connect",()=>{
+      everConnected=true; api.connected=true;
+      setStatus(true,"relay"); updateLiveBadge();
+      client.subscribe(base+"/#",{qos:0});
+      /* Push our presence + current board to THIS broker as retained truth, so a
+         friend who can only reach this one broker still gets the live board. */
+      try{ client.publish(presTopic,presPayload(),{retain:true,qos:0});
+           Object.values(state).forEach(o=>client.publish(base+"/el/"+o.id,JSON.stringify(o),{retain:true,qos:0}));
+           client.publish(base+"/layout",JSON.stringify(layout),{retain:true,qos:0}); }catch(_){}
+    });
+    client.on("message",onMessage);
+    client.on("error",e=>console.error("relay",url,(e&&e.message)||e));
+    client.on("close",()=>{ if(!anyUp()){ api.connected=false; updateLiveBadge(); } });
+    return client;
   });
-  setInterval(()=>{ if(client.connected) ping(); },20000);
-  return {
-    live:true, relay:true,
+
+  const pub=(t,p)=>{ clients.forEach(c=>{ if(c&&c.connected){ try{ c.publish(t,p,{retain:true,qos:0}); }catch(_){ } } }); };
+  const ping=()=>pub(presTopic,presPayload());
+  setInterval(()=>{ if(anyUp()) ping(); },20000);
+  /* Stop the "connecting…" badge from lying forever: if no broker connects in
+     14s, say so honestly. Local editing keeps working; if a broker connects
+     later, the connect handler above flips us back to LIVE. */
+  setTimeout(()=>{ if(!everConnected){ setStatus(false,"relayfail"); updateLiveBadge(); } },14000);
+
+  Object.assign(api,{
     set:(id,o)=>{ state[id]=o; onState(); saveLocal(); pub(base+"/el/"+id,JSON.stringify(o)); },
     update:(id,pp)=>{ state[id]={...(state[id]||{}),...pp}; onState(); saveLocal(); pub(base+"/el/"+id,JSON.stringify(state[id])); },
     remove:id=>{ delete state[id]; onState(); saveLocal(); pub(base+"/el/"+id,""); },
@@ -358,7 +396,8 @@ function makeMqttStore(room){
       old.forEach(id=>{ if(!state[id]) pub(base+"/el/"+id,""); });
       Object.values(state).forEach(o=>pub(base+"/el/"+o.id,JSON.stringify(o))); pub(base+"/layout",JSON.stringify(layout)); },
     presence:ping
-  };
+  });
+  return api;
 }
 function initStore(){
   const room=currentRoom(); $("#room").value=room;
@@ -371,6 +410,7 @@ function setStatus(live,mode){ const s=$("#status");
   if(mode==="firebase"){ s.textContent="🟢 LIVE — share the link"; s.className=""; }
   else if(mode==="relay"){ s.textContent="🟢 LIVE (public) — share the link"; s.className=""; }
   else if(mode==="connecting"){ s.textContent="🟡 connecting live…"; s.className=""; }
+  else if(mode==="relayfail"){ s.textContent="📵 live relay blocked on this network — saved locally"; s.className="local"; }
   else { s.textContent="💾 local only"; s.className="local"; } }
 function switchRoom(room){ location.hash=room; location.reload(); }
 
@@ -733,7 +773,8 @@ function flash(msg){ $("#hint").textContent=msg; }
 
 /* =====================  GO LIVE BADGE  ========================== */
 function updateLiveBadge(){ const b=$("#liveBadge"); if(!b) return;
-  if(store&&store.relay){ b.textContent="🟢 LIVE on a free public relay"; b.className="livebadge on"; }
+  if(store&&store.relay){ if(store.connected){ b.textContent="🟢 LIVE on a free public relay"; b.className="livebadge on"; }
+    else { b.textContent="🟡 connecting to relay…"; b.className="livebadge off"; } }
   else if(store&&store.live){ b.textContent="🟢 LIVE — private Firebase on"; b.className="livebadge on"; }
   else{ b.textContent="🟠 Local only — not live yet"; b.className="livebadge off"; } }
 
